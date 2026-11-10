@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mabinogi Mobile JP Damage Meter v5</title>
+<style>
+:root{color-scheme:dark;font-family:system-ui,-apple-system,'Segoe UI',sans-serif}*{box-sizing:border-box}
+body{margin:0;background:#0b1220;color:#edf3ff}main{width:min(1100px,98vw);margin:20px auto;padding:0 8px}h1{font-size:23px;margin:0 0 4px}p{line-height:1.55}
+.top{display:flex;align-items:center;flex-wrap:wrap;gap:14px;justify-content:space-between}.muted{color:#9caac2;font-size:12px}
+.panel{background:#151e2e;border:1px solid #28354b;border-radius:13px;padding:17px;margin-top:14px}
+#status{font-size:13px;padding:6px 12px;background:#43232c;border-radius:20px;color:#ffd8dc}.connected{background:#153c32!important;color:#aff8d2!important}
+.stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}.stats .value{font-size:28px;font-weight:700;font-variant-numeric:tabular-nums;margin:5px 0}
+.stats small{color:#a7b4cd}h2{font-size:16px;margin:0 0 13px}button{background:#234265;border:1px solid #45658a;border-radius:8px;color:#e9f5ff;padding:8px 12px;cursor:pointer}button:hover{background:#2f567e}
+.table{width:100%;border-collapse:collapse}th,td{padding:8px;text-align:left;border-bottom:1px solid #293648;font-size:13px}th{color:#abbad2;font-weight:500}tr.selected{background:#28384d}tr[data-user]{cursor:pointer}tr[data-user]:hover{background:#233248}
+.id{font-family:Consolas,monospace;color:#b6d4ff}select{background:#111a29;border:1px solid #455777;border-radius:7px;padding:8px;color:#eef3fa;max-width:230px}
+.flex{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.spacer{flex:1}.empty{color:#8fa0b9;padding:26px 8px;text-align:center}
+.bar{height:7px;border-radius:5px;background:#293a52;overflow:hidden;margin-top:4px}.fill{height:100%;background:#6ea9ef}
+@media(max-width:700px){.stats{grid-template-columns:repeat(2,minmax(0,1fr))}.stats .value{font-size:21px}th,td{padding:6px;font-size:12px}main{margin:12px auto}}
+</style></head><body><main>
+<div class="top"><div><h1>❄ Mabinogi Mobile — 日本版 DPS試作 v5（従来ブラウザ版）</h1><div class="muted">ローカル専用・非公式・検証用 / 日本版 0x5243 ダメージ記録 / CSV 3種類から日本語名を参照 / スキルの根拠は辞書内に記載</div></div><span id="status">未接続</span></div>
+<div class="panel flex"><strong id="battle-state">ダメージ待機中（リセットまで累積）</strong><span class="spacer"></span><small id="line-count" class="muted">受信 0 件</small><button id="reset">集計をリセット</button></div>
+<div class="panel"><div class="stats">
+<div><small>選択プレイヤー / 累積平均DPS</small><div class="value" id="avg">—</div></div>
+<div><small>選択プレイヤー / 直近5秒DPS</small><div class="value" id="rolling">—</div></div>
+<div><small>選択プレイヤー / 総ダメージ</small><div class="value" id="total">—</div></div>
+<div><small>選択プレイヤー / 暫定クリ率（DoT含む）</small><div class="value" id="crit">—</div></div>
+</div></div>
+<div class="panel"><div class="flex"><h2>プレイヤー別</h2><span class="spacer"></span><label class="muted">自分の攻撃者IDを選択 <select id="player"><option value="">自動（最多ダメージ）</option></select></label></div>
+<div style="overflow-x:auto"><table class="table"><thead><tr><th>ID</th><th>推定クラス</th><th>累計ダメージ</th><th>累積平均DPS</th><th>直近5秒DPS</th><th>ヒット数</th></tr></thead><tbody id="players"><tr><td colspan="6" class="empty">データを待っています。WebSocket接続だけでは、実際のダメージ取得は確認できません。</td></tr></tbody></table></div></div>
+<div class="panel"><h2 id="skill-title">スキル別ダメージ</h2><div style="overflow-x:auto"><table class="table"><thead><tr><th>スキル名</th><th>累計ダメージ</th><th>割合</th><th>ヒット数</th><th>クリ率</th></tr></thead><tbody id="skills"><tr><td colspan="5" class="empty">ログ受信後に表示</td></tr></tbody></table></div></div>
+<p class="muted">DPSは受信したダメージイベントを基準に計算します。<strong>自動戦闘終了・時間による自動リセットはありません。</strong>「集計をリセット」を押すまで、無通信の時間を挟んでも累積ダメージ・ヒット数を保持します。累積平均DPSは最初のヒットから最後のヒットまでの経過秒数（最低1秒）で割り、攻撃停止中は値を維持します。攻撃を再開すると、その間の無攻撃時間も計測区間に含まれます。直近5秒DPS = 過去5秒間のダメージ合計÷5（無攻撃時は0）。2026-11-03版の3種類のスキル名候補CSVを参照します。フラグは韓国版定義と日本版実測に基づきます。スキル別内訳のうち「候補」「未確定」は所属が未検証です。継続ダメージ・ペット・複数イベントの重複と取りこぼしは未検証で、公式DPSとは異なる場合があります。</p>
+</main><script>
+'use strict';
+const $ = id => document.getElementById(id);
+const fmt = n => Number.isFinite(n) ? Math.round(n).toLocaleString('ja-JP') : '—';
+let sock, connected=false, startAt=0, lastAt=0, actors=new Map(), received=0;
+const classNames={IceMage:'氷結術師',FireMage:'火炎術師',HighMage:'魔法使い',SwordMaster:'剣術師',Fighter:'格闘家',Dancer:'ダンサー',LongBowMan:'長弓兵',Arbalist:'石弓射手',HighThief:'盗賊',DualBlades:'デュアルブレイド',Healer:'ヒーラー',Priest:'司祭',Bard:'吟遊詩人'};
+function clearBattle(){startAt=0;lastAt=0;actors.clear();received=0;$('player').value='';render();}
+$('reset').addEventListener('click',clearBattle);
+$('player').addEventListener('change',render);
+function guessClass(a){for(const skill of a.skills.keys()){for(const [key,label] of Object.entries(classNames)){if(skill.includes(key))return label;}}return '不明';}
+function parseLog(msg){
+ const p=msg.split('|');if(p.length!==23)return;
+ const t=Number(p[0]),d=Number(p[5]);if(!Number.isFinite(t)||!Number.isFinite(d)||d<0||d>1e10)return;
+ const who=p[1],skill=p[3]||'UNKNOWN';if(!who)return;
+ if(!startAt)startAt=t;
+ if(t<lastAt-1500)return; // ignore grossly out-of-order events
+ lastAt=Math.max(t,lastAt);
+ let a=actors.get(who);if(!a){a={total:0,hits:0,crits:0,critKnown:0,skills:new Map(),last5:[]};actors.set(who,a);}
+ a.total+=d;a.hits++;if(p[6]==='1'||p[6]==='0'){a.critKnown++;a.crits+=p[6]==='1'?1:0;}a.last5.push({t,d});
+ let s=a.skills.get(skill);if(!s){s={total:0,hits:0,crits:0,critKnown:0};a.skills.set(skill,s);}
+ s.total+=d;s.hits++;if(p[6]==='1'||p[6]==='0'){s.critKnown++;s.crits+=p[6]==='1'?1:0;}
+ received++;render();
+}
+function rolling(a,now){if(!a)return 0;while(a.last5.length&&a.last5[0].t<now-5000)a.last5.shift();return a.last5.reduce((n,x)=>n+x.d,0)/5;}
+function selectId(){let s=$('player').value;if(s&&actors.has(s))return s;let entries=[...actors.entries()].sort((a,b)=>b[1].total-a[1].total);return entries[0]?.[0]||'';}
+function clearRows(el){while(el.firstChild)el.removeChild(el.firstChild);}
+function cell(tr,value,cls=''){const td=document.createElement('td');td.textContent=value;if(cls)td.className=cls;tr.appendChild(td);return td;}
+function render(){
+ const now=Date.now();
+ $('battle-state').textContent=!startAt?'ダメージ待機中（リセットまで累積）':'計測中（リセットまで累積）';
+ const seconds=startAt?Math.max(0,Math.round((lastAt-startAt)/1000)):0;
+ const elapsed=`${Math.floor(seconds/3600)>0?Math.floor(seconds/3600)+':':''}${String(Math.floor(seconds/60)%60).padStart(2,'0')}:${String(seconds%60).padStart(2,'0')}`;
+ $('line-count').textContent=`受信 ${received.toLocaleString()} 件 / 計測区間 ${elapsed}`;
+ const options=$('player'),prev=options.value;
+ for(let i=options.options.length-1;i>=1;i--)options.remove(i);
+ for(const id of actors.keys()){const opt=document.createElement('option');opt.value=id;opt.textContent=`${id} / ${guessClass(actors.get(id))}`;options.appendChild(opt);}
+ if(actors.has(prev))options.value=prev;
+ const id=selectId(),a=actors.get(id),denom=Math.max(1,(lastAt-startAt)/1000);
+ $('avg').textContent=a?fmt(a.total/denom):'—';$('rolling').textContent=a?fmt(rolling(a,now)):'—';
+ $('total').textContent=a?fmt(a.total):'—';$('crit').textContent=a&&a.critKnown?`${(a.crits*100/a.critKnown).toFixed(1)}%`:'未解析';
+ const tbody=$('players');clearRows(tbody);
+ const ordered=[...actors.entries()].sort((x,y)=>y[1].total-x[1].total);
+ for(const [pid,actor] of ordered){const tr=document.createElement('tr');tr.dataset.user=pid;if(pid===id)tr.classList.add('selected');
+ cell(tr,pid,'id');cell(tr,guessClass(actor));cell(tr,fmt(actor.total));cell(tr,fmt(actor.total/denom));cell(tr,fmt(rolling(actor,now)));cell(tr,fmt(actor.hits));
+ tr.addEventListener('click',()=>{options.value=pid;render();});tbody.appendChild(tr);}
+ if(!ordered.length){const tr=document.createElement('tr');const td=cell(tr,'ダメージログを待っています。ブラウザとサーバーの接続状態も確認してください。','empty');td.colSpan=6;}
+ const skillRows=$('skills');clearRows(skillRows);$('skill-title').textContent=`スキル別ダメージ${id?' — '+id:''}`;
+ if(a){for(const [name,s] of [...a.skills.entries()].sort((x,y)=>y[1].total-x[1].total)){
+ const tr=document.createElement('tr');cell(tr,name);cell(tr,fmt(s.total));cell(tr,`${(100*s.total/Math.max(1,a.total)).toFixed(1)}%`);cell(tr,fmt(s.hits));cell(tr,s.critKnown?`${(100*s.crits/s.critKnown).toFixed(1)}%`:'未解析');skillRows.appendChild(tr);
+ }}else{const tr=document.createElement('tr');const td=cell(tr,'ログ受信後に表示','empty');td.colSpan=5;}
+}
+function connect(){
+ try{sock=new WebSocket('ws://127.0.0.1:8000');
+ sock.onopen=()=>{connected=true;$('status').textContent='ローカル接続済（ログ待機）';$('status').classList.add('connected');};
+ sock.onmessage=e=>parseLog(String(e.data));
+ sock.onclose=()=>{connected=false;$('status').textContent='切断 / 再接続中';$('status').classList.remove('connected');setTimeout(connect,3000);};
+ sock.onerror=()=>{sock.close();};
+ }catch(_){setTimeout(connect,3000);}
+}
+render();connect();setInterval(render,1000);
+</script></body></html>
